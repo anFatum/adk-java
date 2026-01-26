@@ -128,9 +128,7 @@ public final class ResponseConverter {
     }
 
     List<io.a2a.spec.Part<?>> parts = new ArrayList<>();
-    for (Event event : events) {
-      parts.addAll(eventParts(event));
-    }
+    events.forEach(event -> parts.addAll(EventConverter.contentToParts(event.content())));
 
     Message.Builder builder =
         new Message.Builder()
@@ -145,7 +143,7 @@ public final class ResponseConverter {
 
   /** Converts a single ADK event into an A2A message. */
   public static Message eventToMessage(Event event, String contextId) {
-    List<io.a2a.spec.Part<?>> parts = eventParts(event);
+    List<io.a2a.spec.Part<?>> parts = EventConverter.contentToParts(event.content());
 
     Message.Builder builder =
         new Message.Builder()
@@ -197,14 +195,13 @@ public final class ResponseConverter {
     }
     if (updateEvent instanceof TaskStatusUpdateEvent statusEvent) {
       var status = statusEvent.getStatus();
-      if (status.message() != null) {
-        return Optional.of(
-            messageToEvent(
-                status.message(),
-                context,
-                PENDING_STATES.contains(event.getTask().getStatus().state())));
-      }
-      return Optional.empty();
+      return Optional.ofNullable(status.message())
+          .map(
+              value ->
+                  messageToEvent(
+                      value,
+                      context,
+                      PENDING_STATES.contains(event.getTask().getStatus().state())));
     }
     throw new IllegalArgumentException(
         "Unsupported TaskUpdateEvent type: " + updateEvent.getClass());
@@ -224,8 +221,6 @@ public final class ResponseConverter {
   public static Event messageToEvent(
       Message message, InvocationContext invocationContext, boolean isPending) {
 
-    // for streaming task, that are in the pending state (WORKING or SUBMITTED),
-    // we update the content parts to have thought as true. (to mark them as thought updates)
     ImmutableList<com.google.genai.types.Part> genaiParts =
         PartConverter.toGenaiParts(message.getParts()).stream()
             .map(part -> part.toBuilder().thought(isPending).build())
@@ -259,19 +254,6 @@ public final class ResponseConverter {
       return messageToEvent(taskMessage, invocationContext);
     }
     return emptyEvent(invocationContext);
-  }
-
-  private static List<io.a2a.spec.Part<?>> eventParts(Event event) {
-    List<io.a2a.spec.Part<?>> parts = new ArrayList<>();
-    Optional<Content> content = event.content();
-    if (content.isEmpty() || content.get().parts().isEmpty()) {
-      return parts;
-    }
-
-    for (com.google.genai.types.Part genaiPart : content.get().parts().get()) {
-      PartConverter.fromGenaiPart(genaiPart).ifPresent(parts::add);
-    }
-    return parts;
   }
 
   private static Event emptyEvent(InvocationContext invocationContext) {

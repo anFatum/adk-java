@@ -1,5 +1,7 @@
 package com.google.adk.a2a;
 
+import static com.google.common.base.Strings.nullToEmpty;
+
 import com.google.adk.a2a.common.A2AClientError;
 import com.google.adk.a2a.converters.EventConverter;
 import com.google.adk.a2a.converters.ResponseConverter;
@@ -84,7 +86,7 @@ public class RemoteA2AAgent extends BaseAgent {
     if (this.agentCard == null) {
       throw new IllegalArgumentException("agentCard cannot be null");
     }
-    this.description = builder.description != null ? builder.description : "";
+    this.description = nullToEmpty(builder.description);
     // If builder description is empty, use the one from AgentCard
     if (this.description.isEmpty() && this.agentCard.description() != null) {
       this.description = this.agentCard.description();
@@ -170,6 +172,8 @@ public class RemoteA2AAgent extends BaseAgent {
       return Flowable.empty();
     }
 
+    System.out.println("converted events: " + a2aMessageOpt);
+
     Message originalMessage = a2aMessageOpt.get();
 
     return Flowable.create(
@@ -187,10 +191,12 @@ public class RemoteA2AAgent extends BaseAgent {
   }
 
   private void handleClientError(Throwable e, FlowableEmitter<Event> emitter, AtomicBoolean done) {
-    done.set(emitter.isCancelled());
+    // Mark the flow as done if it is already cancelled.
+    done.compareAndSet(false, emitter.isCancelled());
+
+    // If the flow is already done, stop processing and exit the consumer.
     if (done.get()) {
-      return; // Stop processing and exit the consumer, since the flow is already completed or
-      // cancelled.
+      return;
     }
     // If the error is raised, complete the flow with an error.
     if (!done.getAndSet(true)) {
@@ -203,8 +209,12 @@ public class RemoteA2AAgent extends BaseAgent {
       FlowableEmitter<Event> emitter,
       InvocationContext invocationContext,
       AtomicBoolean done) {
-    if (emitter.isCancelled() || done.get()) {
-      return; // Stop processing and exit the consumer
+    // Mark the flow as done if it is already cancelled.
+    done.compareAndSet(false, emitter.isCancelled());
+
+    // If the flow is already done, stop processing and exit the consumer.
+    if (done.get()) {
+      return;
     }
 
     Optional<Event> event = ResponseConverter.clientEventToEvent(clientEvent, invocationContext);

@@ -4,18 +4,24 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.adk.a2a.common.GenAIFieldMissingException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.genai.types.Blob;
+import com.google.genai.types.CodeExecutionResult;
+import com.google.genai.types.Content;
+import com.google.genai.types.ExecutableCode;
 import com.google.genai.types.FileData;
 import com.google.genai.types.FunctionCall;
 import com.google.genai.types.FunctionResponse;
+import com.google.genai.types.Outcome;
 import com.google.genai.types.Part;
 import io.a2a.spec.DataPart;
 import io.a2a.spec.FileContent;
 import io.a2a.spec.FilePart;
 import io.a2a.spec.FileWithBytes;
 import io.a2a.spec.FileWithUri;
+import io.a2a.spec.Message;
 import io.a2a.spec.TextPart;
 import java.util.Base64;
 import java.util.HashMap;
@@ -32,11 +38,30 @@ import org.slf4j.LoggerFactory;
  * use in production code.
  */
 public final class PartConverter {
+
+  private enum A2ADataPartMetadataType {
+    FunctionResponse("function_response"),
+    FunctionCall("function_call"),
+    CodeExecutionResult("code_execution_result"),
+    ExecutableCode("executable_code");
+
+    private final String type;
+
+    private A2ADataPartMetadataType(String type) {
+      this.type = type;
+    }
+
+    public String getType() {
+      return type;
+    }
+  }
+
   private static final Logger logger = LoggerFactory.getLogger(PartConverter.class);
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-  // Constants for metadata types
-  public static final String A2A_DATA_PART_METADATA_TYPE_KEY = "type";
-  public static final String A2A_DATA_PART_METADATA_IS_LONG_RUNNING_KEY = "is_long_running";
+  // Constants for metadata types. By convention metadata keys are prefixed with "adk_" to align
+  // with the Python and Golang libraries.
+  public static final String A2A_DATA_PART_METADATA_TYPE_KEY = "adk_type";
+  public static final String A2A_DATA_PART_METADATA_IS_LONG_RUNNING_KEY = "adk_is_long_running";
   public static final String A2A_DATA_PART_METADATA_TYPE_FUNCTION_CALL = "function_call";
   public static final String A2A_DATA_PART_METADATA_TYPE_FUNCTION_RESPONSE = "function_response";
   public static final String A2A_DATA_PART_METADATA_TYPE_CODE_EXECUTION_RESULT =
@@ -71,30 +96,6 @@ public final class PartConverter {
         .map(PartConverter::toGenaiPart)
         .flatMap(Optional::stream)
         .collect(toImmutableList());
-  }
-
-  /**
-   * Convert a Google GenAI Part to an A2A Part.
-   *
-   * @param part The GenAI part to convert.
-   * @return Optional containing the converted A2A Part, or empty if conversion fails.
-   */
-  public static Optional<DataPart> convertGenaiPartToA2aPart(Part part) {
-    if (part == null) {
-      return Optional.empty();
-    }
-
-    if (part.text().isPresent()) {
-      // Text parts are handled directly in the Message content, not as DataPart
-      return Optional.empty();
-    } else if (part.functionCall().isPresent()) {
-      return createDataPartFromFunctionCall(part.functionCall().get());
-    } else if (part.functionResponse().isPresent()) {
-      return createDataPartFromFunctionResponse(part.functionResponse().get());
-    }
-
-    logger.warn("Cannot convert unsupported part for Google GenAI part: " + part);
-    return Optional.empty();
   }
 
   private static Optional<com.google.genai.types.Part> convertFilePartToGenAiPart(
@@ -136,9 +137,9 @@ public final class PartConverter {
   private static Optional<com.google.genai.types.Part> convertDataPartToGenAiPart(
       DataPart dataPart) {
     Map<String, Object> data =
-        Optional.ofNullable(dataPart.getData()).map(HashMap::new).orElse(new HashMap<>());
+        Optional.ofNullable(dataPart.getData()).map(HashMap::new).orElseGet(HashMap::new);
     Map<String, Object> metadata =
-        Optional.ofNullable(dataPart.getMetadata()).map(HashMap::new).orElse(new HashMap<>());
+        Optional.ofNullable(dataPart.getMetadata()).map(HashMap::new).orElseGet(HashMap::new);
 
     String metadataType = metadata.getOrDefault(A2A_DATA_PART_METADATA_TYPE_KEY, "").toString();
 
@@ -184,75 +185,160 @@ public final class PartConverter {
    *
    * @return Optional containing the converted A2A Part, or empty if conversion fails.
    */
-  private static Optional<DataPart> createDataPartFromFunctionCall(FunctionCall functionCall) {
+  private static DataPart createDataPartFromFunctionCall(FunctionCall functionCall) {
     Map<String, Object> data = new HashMap<>();
     data.put("name", functionCall.name().orElse(""));
     data.put("id", functionCall.id().orElse(""));
     data.put("args", functionCall.args().orElse(ImmutableMap.of()));
+    addValueIfPresent(data, "willContinue", functionCall.willContinue());
+    addValueIfPresent(data, "partialArgs", functionCall.partialArgs());
 
     ImmutableMap<String, Object> metadata =
-        ImmutableMap.of(A2A_DATA_PART_METADATA_TYPE_KEY, A2A_DATA_PART_METADATA_TYPE_FUNCTION_CALL);
+        ImmutableMap.of(
+            A2A_DATA_PART_METADATA_TYPE_KEY, A2ADataPartMetadataType.FunctionCall.getType());
 
-    return Optional.of(new DataPart(data, metadata));
+    return new DataPart(data, metadata);
+  }
+
+  private static void addValueIfPresent(Map<String, Object> data, String key, Optional<?> value) {
+    if (value.isPresent()) {
+      data.put(key, value.get());
+    }
   }
 
   /**
    * Creates an A2A DataPart from a Google GenAI FunctionResponse.
    *
    * @param functionResponse The GenAI FunctionResponse to convert.
-   * @return Optional containing the converted A2A Part, or empty if conversion fails.
+   * @return The converted A2A Part.
    */
-  private static Optional<DataPart> createDataPartFromFunctionResponse(
-      FunctionResponse functionResponse) {
+  private static DataPart createDataPartFromFunctionResponse(FunctionResponse functionResponse) {
     Map<String, Object> data = new HashMap<>();
     data.put("name", functionResponse.name().orElse(""));
     data.put("id", functionResponse.id().orElse(""));
     data.put("response", functionResponse.response().orElse(ImmutableMap.of()));
+    addValueIfPresent(data, "willContinue", functionResponse.willContinue());
+    addValueIfPresent(data, "scheduling", functionResponse.scheduling());
+    addValueIfPresent(data, "parts", functionResponse.parts());
 
     ImmutableMap<String, Object> metadata =
         ImmutableMap.of(
-            A2A_DATA_PART_METADATA_TYPE_KEY, A2A_DATA_PART_METADATA_TYPE_FUNCTION_RESPONSE);
+            A2A_DATA_PART_METADATA_TYPE_KEY, A2ADataPartMetadataType.FunctionResponse.getType());
 
-    return Optional.of(new DataPart(data, metadata));
+    return new DataPart(data, metadata);
+  }
+
+  /**
+   * Creates an A2A DataPart from a Google GenAI CodeExecutionResult.
+   *
+   * @param codeExecutionResult The GenAI CodeExecutionResult to convert.
+   * @return The converted A2A Part.
+   */
+  private static DataPart createDataPartFromCodeExecutionResult(
+      CodeExecutionResult codeExecutionResult) {
+    Map<String, Object> data = new HashMap<>();
+    data.put("outcome", codeExecutionResult.outcome().orElse(new Outcome("")));
+    addValueIfPresent(data, "output", codeExecutionResult.output());
+
+    ImmutableMap<String, Object> metadata =
+        ImmutableMap.of(
+            A2A_DATA_PART_METADATA_TYPE_KEY, A2ADataPartMetadataType.CodeExecutionResult.getType());
+
+    return new DataPart(data, metadata);
+  }
+
+  /**
+   * Creates an A2A DataPart from a Google GenAI ExecutableCode.
+   *
+   * @param executableCode The GenAI ExecutableCode to convert.
+   * @return The converted A2A Part.
+   */
+  private static DataPart createDataPartFromExecutableCode(ExecutableCode executableCode) {
+    Map<String, Object> data = new HashMap<>();
+    if (executableCode.code().isEmpty()) {
+      throw new IllegalArgumentException("ExecutableCode must have code");
+    }
+    if (executableCode.language().isEmpty()) {
+      throw new IllegalArgumentException("ExecutableCode must have language");
+    }
+    data.put("language", executableCode.language().get());
+    data.put("code", executableCode.code().get());
+
+    ImmutableMap<String, Object> metadata =
+        ImmutableMap.of(
+            A2A_DATA_PART_METADATA_TYPE_KEY, A2ADataPartMetadataType.ExecutableCode.getType());
+
+    return new DataPart(data, metadata);
   }
 
   private PartConverter() {}
 
   /** Convert a GenAI part into the A2A JSON representation. */
-  public static Optional<io.a2a.spec.Part<?>> fromGenaiPart(Part part) {
+  public static io.a2a.spec.Part<?> fromGenaiPart(Part part) {
     if (part == null) {
-      return Optional.empty();
+      throw new GenAIFieldMissingException("GenAI part cannot be null");
     }
 
     if (part.text().isPresent()) {
-      return Optional.of(new TextPart(part.text().get()));
+      Map<String, Object> metadata = null;
+      if (part.thought().isPresent()) {
+        metadata = ImmutableMap.of("thought", part.thought().get());
+      }
+      return new TextPart(part.text().get(), metadata);
     }
 
+    if (part.fileData().isPresent() || part.inlineData().isPresent()) {
+      return filePartToA2A(part);
+    }
+
+    if (part.functionCall().isPresent() || part.functionResponse().isPresent()) {
+      return dataPartToA2A(part);
+    }
+
+    throw new IllegalArgumentException("Unsupported GenAI part type: " + part);
+  }
+
+  private static DataPart dataPartToA2A(Part part) {
+
+    if (part.functionCall().isPresent()) {
+      return createDataPartFromFunctionCall(part.functionCall().get());
+    } else if (part.functionResponse().isPresent()) {
+      return createDataPartFromFunctionResponse(part.functionResponse().get());
+    } else if (part.codeExecutionResult().isPresent()) {
+      return createDataPartFromCodeExecutionResult(part.codeExecutionResult().get());
+    } else if (part.executableCode().isPresent()) {
+      return createDataPartFromExecutableCode(part.executableCode().get());
+    }
+
+    throw new IllegalArgumentException("Unsupported GenAI data part type: " + part);
+  }
+
+  private static FilePart filePartToA2A(Part part) {
     if (part.fileData().isPresent()) {
       FileData fileData = part.fileData().get();
       String uri = fileData.fileUri().orElse(null);
       String mime = fileData.mimeType().orElse(null);
       String name = fileData.displayName().orElse(null);
-      return Optional.of(new FilePart(new FileWithUri(mime, name, uri)));
+      return new FilePart(new FileWithUri(mime, name, uri));
     }
-
-    if (part.inlineData().isPresent()) {
-      Blob blob = part.inlineData().get();
-      byte[] bytes = blob.data().orElse(null);
-      String encoded = bytes != null ? Base64.getEncoder().encodeToString(bytes) : null;
-      String mime = blob.mimeType().orElse(null);
-      String name = blob.displayName().orElse(null);
-      return Optional.of(new FilePart(new FileWithBytes(mime, name, encoded)));
+    Blob blob = part.inlineData().get();
+    byte[] bytes = blob.data().orElse(null);
+    String encoded = bytes != null ? Base64.getEncoder().encodeToString(bytes) : null;
+    Map<String, Object> metadata = null;
+    if (part.videoMetadata().isPresent()) {
+      metadata = ImmutableMap.of("video_metadata", part.videoMetadata().get());
     }
-
-    if (part.functionCall().isPresent() || part.functionResponse().isPresent()) {
-      return convertGenaiPartToA2aPart(part).map(data -> data);
-    }
-
-    logger.warn("Unsupported GenAI part type for JSON export: {}", part);
-    return Optional.empty();
+    return new FilePart(
+        new FileWithBytes(blob.mimeType().orElse(null), blob.displayName().orElse(null), encoded),
+        metadata);
   }
 
+  public static Content messageToContent(Message message) {
+    List<com.google.genai.types.Part> parts = toGenaiParts(message.getParts());
+    return Content.builder().role("user").parts(parts).build();
+  }
+
+  @SuppressWarnings("unchecked") // safe conversion from OBJECT_MAPPER.readValue
   private static Map<String, Object> coerceToMap(Object value) {
     if (value == null) {
       return new HashMap<>();
