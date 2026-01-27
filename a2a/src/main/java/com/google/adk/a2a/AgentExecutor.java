@@ -1,15 +1,5 @@
 package com.google.adk.a2a;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.google.adk.a2a.converters.EventConverter;
 import com.google.adk.a2a.converters.PartConverter;
 import com.google.adk.agents.RunConfig;
@@ -21,7 +11,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.genai.types.Content;
-
 import io.a2a.server.agentexecution.RequestContext;
 import io.a2a.server.events.EventQueue;
 import io.a2a.server.tasks.TaskUpdater;
@@ -33,6 +22,14 @@ import io.a2a.spec.TextPart;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
 import io.reactivex.rxjava3.disposables.Disposable;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor {
 
@@ -171,19 +168,19 @@ public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor
         throw new InvalidAgentResponseError(
             null, // Uses default code -32006
             "Agent returned an error: " + event.errorCode().get(),
-            null
-        );
+            null);
       }
 
       List<Part<?>> parts = EventConverter.contentToParts(event.content());
       if (event.partial().orElse(false)) {
-        parts.forEach(part -> {
-           Map<String, Object> metadata = part.getMetadata();
-                  if (metadata == null) {
-                    metadata = new HashMap<>();
-                  }
-                  metadata.put("adk_partial", true);
-        });
+        parts.forEach(
+            part -> {
+              Map<String, Object> metadata = part.getMetadata();
+              if (metadata == null) {
+                metadata = new HashMap<>();
+              }
+              metadata.put("adk_partial", true);
+            });
       }
 
       updater.addArtifact(parts, taskId, null, ImmutableMap.of());
