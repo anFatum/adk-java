@@ -1,34 +1,49 @@
 package com.google.adk.a2a;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.adk.a2a.converters.EventConverter;
 import com.google.adk.a2a.converters.PartConverter;
+import com.google.adk.agents.RunConfig;
+import com.google.adk.events.Event;
 import com.google.adk.runner.Runner;
 import com.google.adk.sessions.BaseSessionService;
 import com.google.adk.sessions.Session;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.genai.types.Content;
+
 import io.a2a.server.agentexecution.RequestContext;
 import io.a2a.server.events.EventQueue;
 import io.a2a.server.tasks.TaskUpdater;
+import io.a2a.spec.InvalidAgentResponseError;
 import io.a2a.spec.JSONRPCError;
 import io.a2a.spec.Message;
-import io.a2a.spec.Task;
-import io.a2a.spec.TaskState;
-import io.a2a.spec.TaskStatus;
+import io.a2a.spec.Part;
+import io.a2a.spec.TextPart;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
 import io.reactivex.rxjava3.disposables.Disposable;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import javax.annotation.Nonnull;
 
 public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor {
 
+  private static final Logger logger = LoggerFactory.getLogger(AgentExecutor.class);
   private final Runner runner;
-  private final String UserIdPrefix = "A2A_USER_";
+  private final String USER_ID_PREFIX = "A2A_USER_";
   private final Map<String, Disposable> activeTasks = new ConcurrentHashMap<>();
+  private static final RunConfig DEFAULT_RUN_CONFIG =
+      RunConfig.builder().setStreamingMode(RunConfig.StreamingMode.NONE).setMaxLlmCalls(20).build();
 
-  protected AgentExecutor(Runner runner) {
+  public AgentExecutor(Runner runner) {
     this.runner = runner;
   }
 
@@ -52,8 +67,10 @@ public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor
   }
 
   @Override
-  public void cancel(RequestContext context, EventQueue eventQueue) throws JSONRPCError {
-    throw new UnsupportedOperationException("Unimplemented method 'cancel'");
+  public void cancel(RequestContext ctx, EventQueue eventQueue) throws JSONRPCError {
+    TaskUpdater updater = new TaskUpdater(ctx, eventQueue);
+    updater.cancel();
+    cleanupTask(ctx.getTaskId());
   }
 
   @Override
@@ -64,41 +81,41 @@ public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor
       throw new IllegalArgumentException("Message cannot be null");
     }
 
+    // Submits a new task if there is no active task.
     if (ctx.getTask() == null) {
-      updater.startWork(message);
-      eventQueue.enqueueEvent(statusUpdatedTask(ctx, message, TaskState.SUBMITTED));
+      updater.submit();
     }
-
-    Content c = PartConverter.messageToContent(message);
-
-    Maybe<Session> maybeSession = prepareSession(ctx, runner.sessionService());
 
     // Group all reactive work for this task into one container
     CompositeDisposable taskDisposables = new CompositeDisposable();
-    activeTasks.put(ctx.getTaskId(), taskDisposables);
+    // Check if the task with the task id is already running, put if absent.
+    if (activeTasks.putIfAbsent(ctx.getTaskId(), taskDisposables) != null) {
+      throw new RuntimeException(String.format("Task {} already running", ctx.getTaskId()));
+    }
+
+    EventProcessor p = new EventProcessor();
+    Content content = PartConverter.messageToContent(message);
 
     taskDisposables.add(
-        maybeSession.subscribe(
-            session -> {
-              eventQueue.enqueueEvent(statusUpdatedTask(ctx, message, TaskState.WORKING));
-              taskDisposables.add(
-                  runner
-                      .runAsync(getUserID(ctx), session.id(), c, null)
-                      .subscribe(
-                          event -> {},
-                          error -> {
-                            updater.fail(message);
-                            cleanupTask(ctx.getTaskId());
-                          },
-                          () -> {
-                            updater.complete(message);
-                            cleanupTask(ctx.getTaskId());
-                          }));
-            },
-            error -> {
-              updater.fail(message);
-              cleanupTask(ctx.getTaskId());
-            }));
+        prepareSession(ctx, runner.sessionService())
+            .flatMapPublisher(
+                session -> {
+                  updater.startWork();
+                  return runner.runAsync(getUserID(ctx), session.id(), content, DEFAULT_RUN_CONFIG);
+                })
+            .subscribe(
+                event -> {
+                  p.process(event, updater);
+                },
+                error -> {
+                  logger.error("Runner failed with {}", error);
+                  updater.fail(failedMessage(ctx, error));
+                  cleanupTask(ctx.getTaskId());
+                },
+                () -> {
+                  updater.complete();
+                  cleanupTask(ctx.getTaskId());
+                }));
   }
 
   private void cleanupTask(String taskId) {
@@ -109,7 +126,7 @@ public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor
   }
 
   private String getUserID(RequestContext ctx) {
-    return UserIdPrefix + ctx.getContextId();
+    return USER_ID_PREFIX + ctx.getContextId();
   }
 
   private String getAppName() {
@@ -118,7 +135,7 @@ public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor
 
   private Maybe<Session> prepareSession(RequestContext ctx, BaseSessionService service) {
     return service
-        .getSession(getAppName(), getUserID(ctx), ctx.getContextId(), null)
+        .getSession(getAppName(), getUserID(ctx), ctx.getContextId(), Optional.empty())
         .switchIfEmpty(
             Maybe.defer(
                 () -> {
@@ -126,12 +143,50 @@ public class AgentExecutor implements io.a2a.server.agentexecution.AgentExecutor
                 }));
   }
 
-  private Task statusUpdatedTask(RequestContext context, @Nonnull Message msg, TaskState state) {
-    return new Task.Builder()
-        .id(context.getTaskId())
+  private static Message messageForTask(
+      RequestContext context, Message.Role role, List<Part<?>> parts) {
+    return new Message.Builder()
+        .messageId(UUID.randomUUID().toString())
         .contextId(context.getContextId())
-        .history(ImmutableList.of(msg))
-        .status(new TaskStatus(state))
+        .taskId(context.getTaskId())
+        .role(role)
+        .parts(parts)
         .build();
+  }
+
+  private static Message failedMessage(RequestContext context, Throwable e) {
+    return messageForTask(
+        context, Message.Role.AGENT, ImmutableList.of(new TextPart(e.getMessage())));
+  }
+
+  private static class EventProcessor {
+    public EventProcessor() {
+      taskId = UUID.randomUUID().toString();
+    }
+
+    private final String taskId;
+
+    private void process(Event event, TaskUpdater updater) {
+      if (event.errorCode().isPresent()) {
+        throw new InvalidAgentResponseError(
+            null, // Uses default code -32006
+            "Agent returned an error: " + event.errorCode().get(),
+            null
+        );
+      }
+
+      List<Part<?>> parts = EventConverter.contentToParts(event.content());
+      if (event.partial().orElse(false)) {
+        parts.forEach(part -> {
+           Map<String, Object> metadata = part.getMetadata();
+                  if (metadata == null) {
+                    metadata = new HashMap<>();
+                  }
+                  metadata.put("adk_partial", true);
+        });
+      }
+
+      updater.addArtifact(parts, taskId, null, ImmutableMap.of());
+    }
   }
 }

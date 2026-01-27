@@ -1,10 +1,12 @@
 package com.google.adk.webservice;
 
-import com.google.adk.a2a.A2ASendMessageExecutor;
+import com.google.adk.a2a.AgentExecutor;
 import com.google.adk.agents.BaseAgent;
-import java.time.Duration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.google.adk.runner.Runner;
+import com.google.adk.sessions.InMemorySessionService;
+import io.a2a.spec.AgentCapabilities;
+import io.a2a.spec.AgentCard;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
@@ -31,19 +33,29 @@ import org.springframework.context.annotation.Configuration;
 @ComponentScan(basePackages = "com.google.adk.webservice")
 public class A2ARemoteConfiguration {
 
-  private static final Logger logger = LoggerFactory.getLogger(A2ARemoteConfiguration.class);
   private static final String DEFAULT_APP_NAME = "a2a-remote-service";
-  private static final long DEFAULT_TIMEOUT_SECONDS = 15L;
 
   @Bean
-  public A2ASendMessageExecutor a2aSendMessageExecutor(
-      BaseAgent agent,
-      @Value("${a2a.remote.appName:" + DEFAULT_APP_NAME + "}") String appName,
-      @Value("${a2a.remote.timeoutSeconds:" + DEFAULT_TIMEOUT_SECONDS + "}") long timeoutSeconds) {
-    logger.info(
-        "Initializing A2A send message executor for appName {} with timeout {}s",
-        appName,
-        timeoutSeconds);
-    return new A2ASendMessageExecutor(agent, appName, Duration.ofSeconds(timeoutSeconds));
+  public AgentExecutor agentExecutor(
+      BaseAgent agent, @Value("${a2a.remote.appName:" + DEFAULT_APP_NAME + "}") String appName) {
+    InMemorySessionService sessionService = new InMemorySessionService();
+    Runner runnerInstance =
+        new Runner.Builder().agent(agent).appName(appName).sessionService(sessionService).build();
+    return new AgentExecutor(runnerInstance);
+  }
+
+  @Bean
+  public AgentCard agentCard(
+      BaseAgent agent, @Value("${a2a.remote.appName:" + DEFAULT_APP_NAME + "}") String appName) {
+    return new AgentCard.Builder()
+        .name(agent.name())
+        .description(agent.description())
+        .capabilities(new AgentCapabilities.Builder().build())
+        .defaultInputModes(List.of("text"))
+        .defaultOutputModes(List.of("text"))
+        .skills(List.of())
+        .url("localhost:8080")
+        .version("0.1")
+        .build();
   }
 }

@@ -22,10 +22,6 @@ public final class EventConverter {
 
   private EventConverter() {}
 
-  // public static void adkEventToA2A(Event event) {
-
-  // }
-
   public static Optional<Message> convertEventsToA2AMessage(InvocationContext context) {
     if (context.session().events().isEmpty()) {
       logger.warn("No events in session, cannot convert to A2A message.");
