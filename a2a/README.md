@@ -165,6 +165,18 @@ opt-in Maven profile:
 
 With the server running locally you can exercise the endpoint with `curl`:
 
+
+
+curl -X POST http://localhost:8001/a2a/check_prime_agent \
+  -H "Content-Type: application/json" \
+  -d @rest_request.json
+
+
+curl -X POST http://localhost:8080/a2a/remote/v1/message:send \
+  -H "Content-Type: application/json" \
+  -d @rest_request.json
+
+
 ```bash
 curl -X POST http://localhost:8081/a2a/remote/v1/message:send \
   -H "Content-Type: application/json" \
