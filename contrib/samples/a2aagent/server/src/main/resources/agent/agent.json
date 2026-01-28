@@ -12,7 +12,7 @@
       "tags": ["mathematical", "computation", "prime", "numbers"]
     }
   ],
-  "preferredTransport": "jsonrpc",
+  "preferredTransport": "JSONRPC",
   "url": "http://localhost:8080/a2a/prime_agent",
   "version": "1.0.0"
 }

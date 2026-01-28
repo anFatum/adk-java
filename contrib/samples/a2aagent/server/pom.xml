@@ -8,7 +8,7 @@
     <groupId>com.google.adk</groupId>
     <artifactId>google-adk-samples</artifactId>
     <version>0.5.1-SNAPSHOT</version><!-- {x-version-update:google-adk:current} -->
-    <relativePath>..</relativePath>
+    <relativePath>../..</relativePath>
   </parent>
 
   <artifactId>google-adk-sample-a2a-agent</artifactId>
@@ -48,7 +48,6 @@
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-resteasy-jackson</artifactId>
-      <scope>provided</scope>
     </dependency>
 
     <dependency>
